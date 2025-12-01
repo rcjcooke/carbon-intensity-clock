@@ -97,10 +97,6 @@ String getLocalTimeString(const char* format) {
   return String(timeString);
 }
 
-bool willULongAdditionOverflow(unsigned long a, unsigned long b) {
-    return b > ULONG_MAX - a;
-}
-
 /************************
  * Entry point methods
  ************************/
@@ -124,11 +120,11 @@ void setup() {
 
 void loop() {
 
-  static unsigned long prevMillis = 0;
+  static unsigned long prevMillis = millis() - REFRESH_PERIOD_MS;
 
   unsigned long currentMillis = millis();
-  if (!willULongAdditionOverflow(currentMillis, REFRESH_PERIOD_MS) && currentMillis >= prevMillis + REFRESH_PERIOD_MS) {
-    prevMillis = currentMillis;
+  if (currentMillis - prevMillis >= REFRESH_PERIOD_MS) {
+    prevMillis += REFRESH_PERIOD_MS;
 
     // If the WiFi connection status has changed, let us know and wait for reconnect
     if (WiFi.status() != WL_CONNECTED) {
