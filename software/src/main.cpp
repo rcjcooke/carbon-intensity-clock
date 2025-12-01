@@ -11,6 +11,7 @@ NOTE: To use this:
 #include <time.h>
 #include <ArduinoJson.h>
 #include <limits.h>
+#include <map>
 
 // Wifi credentials recorded in this file
 #include "wifiCredentials.h"
@@ -33,6 +34,11 @@ static const int DAYLIGHT_OFFSET_SEC = 0;
 static const char* API_DATE_FORMAT = "%FT%RZ";
 // Period between data refreshes - 30 minutes in milliseconds
 static const unsigned long REFRESH_PERIOD_MS = 30 * 60 * 1000;
+
+// Number of LEDs in the ring
+static const int NUM_LEDS = 100;
+// Time per LED in seconds
+static const int TIME_PER_LED_SEC = (12 * 60 * 60) / NUM_LEDS;
 
 /************************
  * Variables
@@ -87,13 +93,9 @@ void connectWiFi() {
   Serial.println("Connected. IP: " + WiFi.localIP().toString());
 }
 
-String getLocalTimeString(const char* format) {
-  struct tm timeinfo;
-  if(!getLocalTime(&timeinfo)){
-    return "Failed to obtain time";
-  }
+String createFormattedTimeString(const tm* time, const char* format) {
   char timeString[100];
-  strftime(timeString, 100, format, &timeinfo);
+  strftime(timeString, 100, format, time);
   return String(timeString);
 }
 
@@ -112,9 +114,17 @@ void setup() {
   // Establish WiFi connection
   connectWiFi();
 
-  // Init and get the time
+  // Initialise the time library
   configTime(GMT_OFFSET_SEC, DAYLIGHT_OFFSET_SEC, NTP_SERVER);
-  Serial.println(getLocalTimeString(API_DATE_FORMAT));
+  struct tm currentTime;
+  if(!getLocalTime(&currentTime)) {
+    Serial.println("Failed to obtain time");
+  } else {
+    Serial.println("Current time: " + createFormattedTimeString(&currentTime, API_DATE_FORMAT));
+  }
+
+  // Set up the LED arrays
+  
 
 }
 
@@ -131,12 +141,25 @@ void loop() {
       connectWiFi();
     }
 
-    String nowString = getLocalTimeString(API_DATE_FORMAT);
+    // Get the current time
+    struct tm currentTime;
+    if(!getLocalTime(&currentTime)) {
+      Serial.println("Failed to obtain time");
+      return;
+    }
+    time_t timein12Hours = mktime(&currentTime) + 12 * 60 * 60;
+
+    // Format the current time for the API request
+    String nowString = createFormattedTimeString(&currentTime, API_DATE_FORMAT); 
+    
     HTTPClient client;
     String apiURL = "https://api.carbonintensity.org.uk/regional/intensity/" + nowString + "/fw24h/postcode/" + POST_CODE;
     client.begin(apiURL);
     int httpCode = client.GET();
     if (httpCode == 200) {
+
+      // Extract the next 12 hours of intensities into a map
+
       String payload = client.getString();
       JsonDocument jsonDoc;
       DeserializationError error = deserializeJson(jsonDoc, payload);
@@ -153,26 +176,63 @@ void loop() {
       const char* data_dnoregion = data["dnoregion"]; // "UKPN South East"
       const char* data_shortname = data["shortname"]; // "South East England"
 
+      struct intensityDatum {
+        time_t to;
+        int intensity;
+      };
+      std::map<unsigned long, intensityDatum> intensityMap;
       for (JsonObject data_data_item : data["data"].as<JsonArray>()) {
 
         const char* data_data_item_from = data_data_item["from"]; // "2025-11-29T13:00Z", "2025-11-29T13:30Z", ...
+        time_t fromTime = 0;
+        struct tm tm_from = {};
+        strptime(data_data_item_from, API_DATE_FORMAT, &tm_from);
+
+        // The returned array is ordered, so if we're over the 12 hour window we can stop processing
+        fromTime = mktime(&tm_from);
+        if (fromTime > timein12Hours) {
+          break;
+        }
+
         const char* data_data_item_to = data_data_item["to"]; // "2025-11-29T13:30Z", "2025-11-29T14:00Z", ...
 
         int data_data_item_intensity_forecast = data_data_item["intensity"]["forecast"]; // 65, 66, 60, 61, 76, ...
-        // const char* data_data_item_intensity_index = data_data_item["intensity"]["index"]; // "low", "low", ...
+        
+        // Translate the times to time_t timestamps and store in map
+        time_t toTime = 0;
+        struct tm tm_to = {};
+        strptime(data_data_item_to, API_DATE_FORMAT, &tm_to);
+        toTime = mktime(&tm_to);
 
-        // for (JsonObject data_data_item_generationmix_item : data_data_item["generationmix"].as<JsonArray>()) {
-
-        //   const char* data_data_item_generationmix_item_fuel = data_data_item_generationmix_item["fuel"];
-        //   float data_data_item_generationmix_item_perc = data_data_item_generationmix_item["perc"]; // 0, 0, 53.4, ...
-
-        // }
-
+        intensityMap[fromTime] = {toTime, data_data_item_intensity_forecast};
+        
       }
 
-      // Extract the next 12 hours of intensities into an array
-      // Work out how many lights I have in the ring and how many minutes each light corresponds to
-      // Use linear interpolation to map intensity values to the led array size
+      // Use linear interpolation to map intensity values from the half-hourly data to per-led data for the 12 hour period
+      std::map<unsigned long, int> ledIntensityMap;
+      time_t currentTimeT = mktime(&currentTime);
+      for (int ledIndex = 0; ledIndex < NUM_LEDS; ledIndex++) {
+        time_t ledTime = currentTimeT + ledIndex * TIME_PER_LED_SEC;
+        // Find the two intensity data points that bracket this time
+        auto upper = intensityMap.lower_bound(ledTime);
+        if (upper == intensityMap.end()) {
+          // Out of range - use the last known value
+          ledIntensityMap[ledIndex] = std::prev(upper)->second.intensity;
+        } else if (upper == intensityMap.begin()) {
+          // Out of range - use the first known value
+          ledIntensityMap[ledIndex] = upper->second.intensity;
+        } else {
+          auto lower = std::prev(upper);
+          // Do linear interpolation
+          time_t t0 = lower->first;
+          time_t t1 = upper->first;
+          int i0 = lower->second.intensity;
+          int i1 = upper->second.intensity;
+          int ledIntensity = i0 + (i1 - i0) * (ledTime - t0) / (t1 - t0);
+          ledIntensityMap[ledIndex] = ledIntensity;
+        }
+      }
+
       // Map the intesity values to a colour scale for the LEDs from red at the top end, white in the middle, green at the bottom end
       // Assign those colour values to the LEDs
       // Paint the current time LED blue
