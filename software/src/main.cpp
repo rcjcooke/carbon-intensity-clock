@@ -10,6 +10,7 @@ NOTE: To use this:
 #include <HTTPClient.h>
 #include <time.h>
 #include <ArduinoJson.h>
+#include <limits.h>
 
 // Wifi credentials recorded in this file
 #include "wifiCredentials.h"
@@ -30,6 +31,8 @@ static const int DAYLIGHT_OFFSET_SEC = 0;
 
 // Datetime in ISO8601 format YYYY-MM-DDThh:mmZ e.g. 2017-08-25T12:35Z
 static const char* API_DATE_FORMAT = "%FT%RZ";
+// Period between data refreshes - 30 minutes in milliseconds
+static const unsigned long REFRESH_PERIOD_MS = 30 * 60 * 1000;
 
 /************************
  * Variables
@@ -94,6 +97,10 @@ String getLocalTimeString(const char* format) {
   return String(timeString);
 }
 
+bool willULongAdditionOverflow(unsigned long a, unsigned long b) {
+    return b > ULONG_MAX - a;
+}
+
 /************************
  * Entry point methods
  ************************/
@@ -116,72 +123,79 @@ void setup() {
 }
 
 void loop() {
-  // If the WiFi connection status has changed, let us know and wait for reconnect
-  if (WiFi.status() != WL_CONNECTED) {
-    connectWiFi();
-  }
 
-  String nowString = getLocalTimeString(API_DATE_FORMAT);
-  HTTPClient client;
-  String apiURL = "https://api.carbonintensity.org.uk/regional/intensity/" + nowString + "/fw24h/postcode/" + POST_CODE;
-  client.begin(apiURL);
-  int httpCode = client.GET();
-  if (httpCode == 200) {
-    String payload = client.getString();
-    JsonDocument jsonDoc;
-    DeserializationError error = deserializeJson(jsonDoc, payload);
+  static unsigned long prevMillis = 0;
 
-    if (error) {
-      Serial.print("deserializeJson() failed: ");
-      Serial.println(error.c_str());
-      return;
+  unsigned long currentMillis = millis();
+  if (!willULongAdditionOverflow(currentMillis, REFRESH_PERIOD_MS) && currentMillis >= prevMillis + REFRESH_PERIOD_MS) {
+    prevMillis = currentMillis;
+
+    // If the WiFi connection status has changed, let us know and wait for reconnect
+    if (WiFi.status() != WL_CONNECTED) {
+      connectWiFi();
     }
 
-    JsonObject data = jsonDoc["data"];
+    String nowString = getLocalTimeString(API_DATE_FORMAT);
+    HTTPClient client;
+    String apiURL = "https://api.carbonintensity.org.uk/regional/intensity/" + nowString + "/fw24h/postcode/" + POST_CODE;
+    client.begin(apiURL);
+    int httpCode = client.GET();
+    if (httpCode == 200) {
+      String payload = client.getString();
+      JsonDocument jsonDoc;
+      DeserializationError error = deserializeJson(jsonDoc, payload);
 
-    int data_regionid = data["regionid"]; // 14
-    const char* data_dnoregion = data["dnoregion"]; // "UKPN South East"
-    const char* data_shortname = data["shortname"]; // "South East England"
+      if (error) {
+        Serial.print("deserializeJson() failed: ");
+        Serial.println(error.c_str());
+        return;
+      }
 
-    for (JsonObject data_data_item : data["data"].as<JsonArray>()) {
+      JsonObject data = jsonDoc["data"];
 
-      const char* data_data_item_from = data_data_item["from"]; // "2025-11-29T13:00Z", "2025-11-29T13:30Z", ...
-      const char* data_data_item_to = data_data_item["to"]; // "2025-11-29T13:30Z", "2025-11-29T14:00Z", ...
+      int data_regionid = data["regionid"]; // 14
+      const char* data_dnoregion = data["dnoregion"]; // "UKPN South East"
+      const char* data_shortname = data["shortname"]; // "South East England"
 
-      int data_data_item_intensity_forecast = data_data_item["intensity"]["forecast"]; // 65, 66, 60, 61, 76, ...
-      const char* data_data_item_intensity_index = data_data_item["intensity"]["index"]; // "low", "low", ...
+      for (JsonObject data_data_item : data["data"].as<JsonArray>()) {
 
-      for (JsonObject data_data_item_generationmix_item : data_data_item["generationmix"].as<JsonArray>()) {
+        const char* data_data_item_from = data_data_item["from"]; // "2025-11-29T13:00Z", "2025-11-29T13:30Z", ...
+        const char* data_data_item_to = data_data_item["to"]; // "2025-11-29T13:30Z", "2025-11-29T14:00Z", ...
 
-        const char* data_data_item_generationmix_item_fuel = data_data_item_generationmix_item["fuel"];
-        float data_data_item_generationmix_item_perc = data_data_item_generationmix_item["perc"]; // 0, 0, 53.4, ...
+        int data_data_item_intensity_forecast = data_data_item["intensity"]["forecast"]; // 65, 66, 60, 61, 76, ...
+        // const char* data_data_item_intensity_index = data_data_item["intensity"]["index"]; // "low", "low", ...
+
+        // for (JsonObject data_data_item_generationmix_item : data_data_item["generationmix"].as<JsonArray>()) {
+
+        //   const char* data_data_item_generationmix_item_fuel = data_data_item_generationmix_item["fuel"];
+        //   float data_data_item_generationmix_item_perc = data_data_item_generationmix_item["perc"]; // 0, 0, 53.4, ...
+
+        // }
 
       }
 
+      // Extract the next 12 hours of intensities into an array
+      // Work out how many lights I have in the ring and how many minutes each light corresponds to
+      // Use linear interpolation to map intensity values to the led array size
+      // Map the intesity values to a colour scale for the LEDs from red at the top end, white in the middle, green at the bottom end
+      // Assign those colour values to the LEDs
+      // Paint the current time LED blue
+
+      jsonDoc.clear();
+
+    } else if (httpCode == 400) {
+      // Bad request
+      Serial.println("Bad request (400)");
+      Serial.println("API time string: " + nowString);
+      Serial.println("Post code: " + POST_CODE);
+      Serial.println("API request URL: " + apiURL);
+    } else if (httpCode == 500) {
+      // Internal Server Error
+    } else {
+
+      // Failed for unexpected reason
+      Serial.println("Error making API request: " + httpCode);
     }
-
-
-
-    jsonDoc.clear();
-
-  } else if (httpCode == 400) {
-    // Bad request
-    Serial.println("Bad request (400)");
-    Serial.println("API time string: " + nowString);
-    Serial.println("Post code: " + POST_CODE);
-    Serial.println("API request URL: " + apiURL);
-  } else if (httpCode == 500) {
-    // Internal Server Error
-  } else {
-
-    // Failed for unexpected reason
-    Serial.println("Error making API request: " + httpCode);
   }
-
-
-  
-
-  // Only query every 30 minutes (the data doesn't change more often than that and we don't want to spam the API)
-  delay(30 * 60 * 60 * 1000);
 }
 
