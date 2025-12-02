@@ -12,9 +12,15 @@ NOTE: To use this:
 #include <ArduinoJson.h>
 #include <limits.h>
 #include <map>
+#include <Adafruit_NeoPixel.h>
 
 // Wifi credentials recorded in this file
 #include "wifiCredentials.h"
+
+/************************
+ * Pins
+ ************************/
+#define LED_PIN     6 // Pin where the LED ring is connected
 
 /************************
  * Constants
@@ -36,13 +42,17 @@ static const char* API_DATE_FORMAT = "%FT%RZ";
 static const unsigned long REFRESH_PERIOD_MS = 30 * 60 * 1000;
 
 // Number of LEDs in the ring
-static const int NUM_LEDS = 100;
+static const int LED_COUNT = 100;
 // Time per LED in seconds
-static const int TIME_PER_LED_SEC = (12 * 60 * 60) / NUM_LEDS;
+static const int TIME_PER_LED_SEC = (12 * 60 * 60) / LED_COUNT;
 
 /************************
  * Variables
  ************************/
+// The LED Strip
+Adafruit_NeoPixel strip(LED_COUNT, LED_PIN, NEO_GRB);
+// The Colour scale array
+uint32_t colourScale[256];
 
 /************************
  * Utility functions
@@ -99,6 +109,25 @@ String createFormattedTimeString(const tm* time, const char* format) {
   return String(timeString);
 }
 
+// Populates the colour scale array from green (low) to white (mid) to red (high)
+void populateColourScale() {
+  for (int i = 0; i < 256; i++) {
+    if (i < 128) {
+      // Green to White
+      uint8_t green = 255;
+      uint8_t red = map(i, 0, 127, 0, 255);
+      uint8_t blue = map(i, 0, 127, 0, 255);
+      colourScale[i] = strip.Color(red, green, blue);
+    } else {
+      // White to Red
+      uint8_t red = 255;
+      uint8_t green = map(i, 128, 255, 255, 0);
+      uint8_t blue = map(i, 128, 255, 255, 0);
+      colourScale[i] = strip.Color(red, green, blue);
+    }
+  }
+}
+
 /************************
  * Entry point methods
  ************************/
@@ -123,8 +152,10 @@ void setup() {
     Serial.println("Current time: " + createFormattedTimeString(&currentTime, API_DATE_FORMAT));
   }
 
-  // Set up the LED arrays
-  
+  // Set up the LED arrays and strip
+  populateColourScale();
+  strip.begin();
+  strip.show(); // Initialize all pixels to 'off'
 
 }
 
@@ -172,15 +203,13 @@ void loop() {
 
       JsonObject data = jsonDoc["data"];
 
-      int data_regionid = data["regionid"]; // 14
-      const char* data_dnoregion = data["dnoregion"]; // "UKPN South East"
-      const char* data_shortname = data["shortname"]; // "South East England"
-
       struct intensityDatum {
         time_t to;
         int intensity;
       };
       std::map<unsigned long, intensityDatum> intensityMap;
+      int minIntensity = INT_MAX;
+      int maxIntensity = INT_MIN;
       for (JsonObject data_data_item : data["data"].as<JsonArray>()) {
 
         const char* data_data_item_from = data_data_item["from"]; // "2025-11-29T13:00Z", "2025-11-29T13:30Z", ...
@@ -195,7 +224,6 @@ void loop() {
         }
 
         const char* data_data_item_to = data_data_item["to"]; // "2025-11-29T13:30Z", "2025-11-29T14:00Z", ...
-
         int data_data_item_intensity_forecast = data_data_item["intensity"]["forecast"]; // 65, 66, 60, 61, 76, ...
         
         // Translate the times to time_t timestamps and store in map
@@ -203,24 +231,40 @@ void loop() {
         struct tm tm_to = {};
         strptime(data_data_item_to, API_DATE_FORMAT, &tm_to);
         toTime = mktime(&tm_to);
-
         intensityMap[fromTime] = {toTime, data_data_item_intensity_forecast};
+        
+        // Keep track of min and max intensity values so we can define our colour scale later
+        if (data_data_item_intensity_forecast < minIntensity) {
+          minIntensity = data_data_item_intensity_forecast;
+        }
+        if (data_data_item_intensity_forecast > maxIntensity) {
+          maxIntensity = data_data_item_intensity_forecast;
+        }
         
       }
 
+      // Extract the current 12 hour time from the current time object in seconds
+      unsigned long currentTime12HourSecs = currentTime.tm_hour % 12 * 3600 + currentTime.tm_min * 60 + currentTime.tm_sec;
+      
+      // Given the lED ring represents a 12 hour clock, work out which LED index represents the current time
+      int currentTimeLEDIndex = map(currentTime12HourSecs, 0, 12 * 3600, 0, LED_COUNT - 1);
+
+      // Paint the current time LED blue
+      strip.setPixelColor(currentTimeLEDIndex, strip.Color(0, 0, 255));
+
       // Use linear interpolation to map intensity values from the half-hourly data to per-led data for the 12 hour period
-      std::map<unsigned long, int> ledIntensityMap;
       time_t currentTimeT = mktime(&currentTime);
-      for (int ledIndex = 0; ledIndex < NUM_LEDS; ledIndex++) {
+      for (int ledIndex = 1; ledIndex < LED_COUNT; ledIndex++) {
         time_t ledTime = currentTimeT + ledIndex * TIME_PER_LED_SEC;
+        int intensity = 0;
         // Find the two intensity data points that bracket this time
         auto upper = intensityMap.lower_bound(ledTime);
         if (upper == intensityMap.end()) {
           // Out of range - use the last known value
-          ledIntensityMap[ledIndex] = std::prev(upper)->second.intensity;
+          intensity = std::prev(upper)->second.intensity;
         } else if (upper == intensityMap.begin()) {
           // Out of range - use the first known value
-          ledIntensityMap[ledIndex] = upper->second.intensity;
+          intensity = upper->second.intensity;
         } else {
           auto lower = std::prev(upper);
           // Do linear interpolation
@@ -228,29 +272,38 @@ void loop() {
           time_t t1 = upper->first;
           int i0 = lower->second.intensity;
           int i1 = upper->second.intensity;
-          int ledIntensity = i0 + (i1 - i0) * (ledTime - t0) / (t1 - t0);
-          ledIntensityMap[ledIndex] = ledIntensity;
+          intensity = i0 + (i1 - i0) * (ledTime - t0) / (t1 - t0);
         }
+        // Map the intensity to a colour index
+        int colourIndex = map(intensity, minIntensity, maxIntensity, 0, 255);
+        colourIndex = constrain(colourIndex, 0, 255);
+        
+        // Set the colour on the LED - starting from the current time LED index
+        strip.setPixelColor((currentTimeLEDIndex + ledIndex) % LED_COUNT, colourScale[colourIndex]);
       }
-
-      // Map the intesity values to a colour scale for the LEDs from red at the top end, white in the middle, green at the bottom end
-      // Assign those colour values to the LEDs
-      // Paint the current time LED blue
-
+      
+      // Show the updated LED ring
+      strip.show();
+      // Clear off the JSON document to free memory
       jsonDoc.clear();
 
     } else if (httpCode == 400) {
+
       // Bad request
       Serial.println("Bad request (400)");
       Serial.println("API time string: " + nowString);
       Serial.println("Post code: " + POST_CODE);
       Serial.println("API request URL: " + apiURL);
+
     } else if (httpCode == 500) {
+
       // Internal Server Error
+
     } else {
 
       // Failed for unexpected reason
       Serial.println("Error making API request: " + httpCode);
+      
     }
   }
 }
