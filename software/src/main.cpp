@@ -4,6 +4,7 @@ NOTE: To use this:
    password to those required for your wifi network.
  - Change POST_CODE to your post code
  - Change GMT_OFFSET_SEC and DAYLIGHT_OFFSET_SEC to values for your location
+ - Update LED_PIN to the pin you have connected the LED ring to 
 */
 #include <Arduino.h>
 #include <WiFi.h>
@@ -103,6 +104,7 @@ void connectWiFi() {
   Serial.println("Connected. IP: " + WiFi.localIP().toString());
 }
 
+// Format a time string from a tm struct
 String createFormattedTimeString(const tm* time, const char* format) {
   char timeString[100];
   strftime(timeString, 100, format, time);
@@ -132,6 +134,7 @@ void populateColourScale() {
  * Entry point methods
  ************************/
 void setup() {
+
   // Set up serial interface comms
   Serial.begin(115200);
   while(!Serial); // Wait for initialisation of the serial interface
