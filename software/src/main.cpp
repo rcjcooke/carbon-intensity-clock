@@ -43,7 +43,7 @@ static const char* API_DATE_FORMAT = "%FT%RZ";
 static const unsigned long REFRESH_PERIOD_MS = 30 * 60 * 1000;
 
 // Number of LEDs in the ring
-static const int LED_COUNT = 100;
+static const int LED_COUNT = 24;
 // Time per LED in seconds
 static const int TIME_PER_LED_SEC = (12 * 60 * 60) / LED_COUNT;
 
@@ -82,28 +82,6 @@ String formatWiFiStatus(wl_status_t status) {
   }
 }
 
-void connectWiFi() {
-  // Connect and let us know how that goes
-  wl_status_t status;
-  unsigned long prevMillis = millis();
-  while (status != WL_CONNECTED) {
-    // If the status has changed, let us know
-    if (WiFi.status() != status) {
-      status = WiFi.status();
-      Serial.println();
-      Serial.println("WiFi status change to: " + formatWiFiStatus(status));
-      Serial.print("Connecting to wiFi");
-    }
-    // If it's been 500 ms since last time we checked, let us know we're still alive
-    if (millis() - prevMillis >= 500) {
-      Serial.print(".");
-      prevMillis = millis();
-    }
-  }
-  Serial.println();
-  Serial.println("Connected. IP: " + WiFi.localIP().toString());
-}
-
 // Format a time string from a tm struct
 String createFormattedTimeString(const tm* time, const char* format) {
   char timeString[100];
@@ -130,6 +108,56 @@ void populateColourScale() {
   }
 }
 
+void connectWiFi() {
+  // Connect and let us know how that goes
+  wl_status_t status;
+  unsigned long prevMillis = millis();
+  while (status != WL_CONNECTED) {
+    // If the status has changed, let us know
+    if (WiFi.status() != status) {
+      status = WiFi.status();
+      Serial.println();
+      Serial.println("WiFi status change to: " + formatWiFiStatus(status));
+      Serial.print("Connecting to wiFi");
+    }
+    // Update the LED ring animation - assume we do 1 loop per 500 ms
+    // The animation consists of a circling comet of 3 blue LEDs with the brighest LED at the head
+    if (millis() - prevMillis >= 500 / LED_COUNT) {
+      static int animationIndex = 0;
+      strip.clear();
+      for (int i = 0; i < 3; i++) {
+        int ledIndex = (animationIndex + i) % LED_COUNT;
+        uint8_t brightness = 255 - (i * 80); // Decrease brightness for trailing LEDs
+        strip.setPixelColor(ledIndex, strip.Color(0, 0, brightness));
+      }
+      strip.show();
+      animationIndex = (animationIndex + 1) % LED_COUNT;
+    }
+    
+    // If it's been 500 ms since last time we checked, let us know we're still alive on Serial as well
+    if (millis() - prevMillis >= 500) {
+      Serial.print(".");
+      prevMillis = millis();
+    }
+
+  }
+  Serial.println();
+  Serial.println("Connected. IP: " + WiFi.localIP().toString());
+}
+
+// Show which error has occured on the LED ring with one LED in yellow indicating the error index and the rest in dim white
+void showErrorOnLEDs(int errorIndex) {
+  strip.clear();
+  for (int i = 0; i < LED_COUNT; i++) {
+    if (i == errorIndex % LED_COUNT) {
+      strip.setPixelColor(i, strip.Color(255, 255, 0)); // Yellow for error index
+    } else {
+      strip.setPixelColor(i, strip.Color(50, 50, 50)); // Dim white for others
+    }
+  }
+  strip.show();
+}
+
 /************************
  * Entry point methods
  ************************/
@@ -138,6 +166,11 @@ void setup() {
   // Set up serial interface comms
   Serial.begin(115200);
   while(!Serial); // Wait for initialisation of the serial interface
+
+  // Set up the LED arrays and strip
+  populateColourScale();
+  strip.begin();
+  strip.show(); // Initialize all pixels to 'off'
 
   // Set up the Wifi connection - credentials pulled from included wifiCredentials.h (git ignored)
   Serial.println("Starting up WiFi interface");
@@ -154,11 +187,6 @@ void setup() {
   } else {
     Serial.println("Current time: " + createFormattedTimeString(&currentTime, API_DATE_FORMAT));
   }
-
-  // Set up the LED arrays and strip
-  populateColourScale();
-  strip.begin();
-  strip.show(); // Initialize all pixels to 'off'
 
 }
 
@@ -298,14 +326,28 @@ void loop() {
       Serial.println("Post code: " + POST_CODE);
       Serial.println("API request URL: " + apiURL);
 
+      showErrorOnLEDs(1);
+
+      // Wait until the next refresh period to try again
+      // We wouldn't expect the next refresh to work either as the implication is that the API has changed in a backwards incompatible some way
+
     } else if (httpCode == 500) {
 
       // Internal Server Error
+      Serial.println("Internal Server error (500)");
+      
+      showErrorOnLEDs(2);
+      
+      // Wait until the next refresh period to try again
 
     } else {
 
       // Failed for unexpected reason
       Serial.println("Error making API request: " + httpCode);
+
+      showErrorOnLEDs(3);
+      
+      // Wait until the next refresh period to try again
       
     }
   }
