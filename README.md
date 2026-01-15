@@ -5,6 +5,18 @@ A clock that shows when the next forecast window is for the greenest energy in t
 
 The clock will automatically determine the current UK time (adjusted for Daylight Savings as appropriate). This will be shown in blue. From that point onwards, the next full rotation of 12 hours will show in varying shades of green or red when it is best to use electricity in your location based on what the forecast carbon usage at that time will be. i.e. If it's more green, there's more renewable energy on the grid. If it's more red, there's a higher proportion of fossil fuels being burnt to supply the grid. Each block on the clock is a 30 minute segment. Set your dishwasher / washing machine / other delayable electricty using process to start and finish in as green a window as you can!
 
+# File Structure
+
+Important files listed here
+
+```
+electronics/datasheets - For all relevant datasheets
+electronics/Schematic.fzz - Fritzing electronic schematic
+hardware/Carbon Intensity Clock v1.f3z - Fusion 360 model
+software - Platform I/O project
+media - Media used in the README.md
+```
+
 # Requirements
 
 The following raw materials, components and tools are required to build this.
