@@ -34,8 +34,6 @@ static const String POST_CODE = "KT6";
 static const char* NTP_SERVER = "pool.ntp.org";
 // The local offset from GMT in seconds
 static const long GMT_OFFSET_SEC = 0;
-// The local offset for daylight savings time in seconds
-static const int DAYLIGHT_OFFSET_SEC = 0;
 
 // Datetime in ISO8601 format YYYY-MM-DDThh:mmZ e.g. 2017-08-25T12:35Z
 static const char* API_DATE_FORMAT = "%FT%RZ";
@@ -47,6 +45,19 @@ static const int LED_COUNT = 24;
 // Time per LED in seconds
 static const int TIME_PER_LED_SEC = (12 * 60 * 60) / LED_COUNT;
 
+// API returned a 400 status code
+static const int API_400_ERROR = 1;
+// API returned a 500 status code
+static const int API_500_ERROR = 2;
+// API returned an unknown error
+static const int API_UNKNOWN_ERROR = 3;
+// Failed to retrieve the current time
+static const int TIME_RETRIEVAL_ERROR_1 = 4;
+// Failed to retrieve the current time after daylight savings time change
+static const int TIME_RETRIEVAL_ERROR_2 = 5;
+// Failed to deserialise JSON from the API
+static const int JSON_DESERIALISATION_ERROR = 6;
+
 /************************
  * Variables
  ************************/
@@ -54,6 +65,8 @@ static const int TIME_PER_LED_SEC = (12 * 60 * 60) / LED_COUNT;
 Adafruit_NeoPixel strip(LED_COUNT, LED_PIN, NEO_GRB);
 // The Colour scale array
 uint32_t colourScale[256];
+// The local offset for daylight savings time in seconds
+int daylightOffsetSec = 0;
 
 /************************
  * Utility functions
@@ -158,6 +171,52 @@ void showErrorOnLEDs(int errorIndex) {
   strip.show();
 }
 
+// Given that this is always in the UK, we can determine the daylight savings time offset based on the date. Returns true if the offset has changed.
+boolean setDaylighSavingsTimeOffset(const tm* time) {
+
+  int existingOffset = daylightOffsetSec;
+
+  int month = time->tm_mon + 1; // tm_mon is 0-11
+  int day = time->tm_mday;
+  int wday = time->tm_wday; // 0 = Sunday
+  int hour = time->tm_hour;
+
+  // DST starts last Sunday in March at 1am UTC
+  if (month > 3 && month < 10) {
+    // Definitely in DST
+    daylightOffsetSec = 3600;
+  } else if (month < 3 || month > 10) {
+    // Definitely not in DST
+    daylightOffsetSec = 0;
+  } else if (month == 3) {
+    // Check if last Sunday
+    if ((day + (7 - wday)) > 31) {
+      // Last Sunday
+      if (hour >= 1) {
+        daylightOffsetSec = 3600;
+      } else {
+        daylightOffsetSec = 0;
+      }
+    } else {
+      daylightOffsetSec = 0;
+    }
+  } else if (month == 10) {
+    // Check if last Sunday
+    if ((day + (7 - wday)) > 31) {
+      // Last Sunday
+      if (hour >= 1) {
+        daylightOffsetSec = 0;
+      } else {
+        daylightOffsetSec = 3600;
+      }
+    } else {
+      daylightOffsetSec = 3600;
+    }
+  }
+
+  return (existingOffset != daylightOffsetSec);
+}
+
 /************************
  * Entry point methods
  ************************/
@@ -180,7 +239,7 @@ void setup() {
   connectWiFi();
 
   // Initialise the time library
-  configTime(GMT_OFFSET_SEC, DAYLIGHT_OFFSET_SEC, NTP_SERVER);
+  configTime(GMT_OFFSET_SEC, daylightOffsetSec, NTP_SERVER);
   struct tm currentTime;
   if(!getLocalTime(&currentTime)) {
     Serial.println("Failed to obtain time");
@@ -207,8 +266,21 @@ void loop() {
     struct tm currentTime;
     if(!getLocalTime(&currentTime)) {
       Serial.println("Failed to obtain time");
+      showErrorOnLEDs(TIME_RETRIEVAL_ERROR_1);
       return;
     }
+    // Determine whether it is daylight savings time and apply it to the current time if it is
+    if (setDaylighSavingsTimeOffset(&currentTime)) {
+      // Reconfigure time library with new daylight savings offset
+      configTime(GMT_OFFSET_SEC, daylightOffsetSec, NTP_SERVER);
+      // Re-fetch the current time with the new offset applied
+      if(!getLocalTime(&currentTime)) {
+        Serial.println("Failed to obtain time");
+        showErrorOnLEDs(TIME_RETRIEVAL_ERROR_2);
+        return;
+      }
+    }
+
     time_t timein12Hours = mktime(&currentTime) + 12 * 60 * 60;
 
     // Format the current time for the API request
@@ -229,6 +301,8 @@ void loop() {
       if (error) {
         Serial.print("deserializeJson() failed: ");
         Serial.println(error.c_str());
+        showErrorOnLEDs(JSON_DESERIALISATION_ERROR);
+
         return;
       }
 
@@ -326,7 +400,7 @@ void loop() {
       Serial.println("Post code: " + POST_CODE);
       Serial.println("API request URL: " + apiURL);
 
-      showErrorOnLEDs(1);
+      showErrorOnLEDs(API_400_ERROR);
 
       // Wait until the next refresh period to try again
       // We wouldn't expect the next refresh to work either as the implication is that the API has changed in a backwards incompatible some way
@@ -336,7 +410,7 @@ void loop() {
       // Internal Server Error
       Serial.println("Internal Server error (500)");
       
-      showErrorOnLEDs(2);
+      showErrorOnLEDs(API_500_ERROR);
       
       // Wait until the next refresh period to try again
 
@@ -345,7 +419,7 @@ void loop() {
       // Failed for unexpected reason
       Serial.println("Error making API request: " + httpCode);
 
-      showErrorOnLEDs(3);
+      showErrorOnLEDs(API_UNKNOWN_ERROR);
       
       // Wait until the next refresh period to try again
       
